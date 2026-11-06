@@ -1,339 +1,382 @@
 import json
 import os
-import tempfile
-from pathlib import Path
+from typing import Any
 
 import replicate
 import streamlit as st
 
+# ---------------------------------------------------------
+# إعداد الصفحة
+# ---------------------------------------------------------
 st.set_page_config(
-    page_title="استوديو الإبداع بالذكاء الاصطناعي",
+    page_title="AI Creative Studio",
     page_icon="🎬",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-st.title("🎬 استوديو الإبداع بالذكاء الاصطناعي")
-st.caption("إنشاء الصور والفيديوهات والقصص — عبر نماذج تختارها من Replicate.")
+# ---------------------------------------------------------
+# تصميم الواجهة
+# ---------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    :root {
+        --bg: #090a0d;
+        --panel: #17191f;
+        --panel2: #20232b;
+        --line: #30343d;
+        --muted: #a4a9b4;
+        --text: #f5f6f8;
+        --accent: #8173ff;
+    }
+    html, body, [data-testid="stAppViewContainer"] {
+        background: var(--bg) !important;
+        color: var(--text) !important;
+    }
+    [data-testid="stHeader"] { background: transparent !important; }
+    [data-testid="stSidebar"] { display: none; }
+    .block-container {
+        max-width: 1600px;
+        padding-top: 1rem;
+        padding-bottom: 2rem;
+    }
+    h1, h2, h3, p, label, span { color: var(--text); }
+    .top-title {
+        font-size: 1.45rem;
+        font-weight: 750;
+        letter-spacing: .2px;
+        margin: .25rem 0 1rem 0;
+    }
+    .subtle { color: var(--muted) !important; font-size: .88rem; }
+    div[data-testid="stButton"] button,
+    div[data-testid="stFormSubmitButton"] button {
+        border-radius: 12px !important;
+        border: 1px solid var(--line) !important;
+        background: var(--panel2) !important;
+        color: var(--text) !important;
+        min-height: 2.7rem;
+        font-weight: 600;
+    }
+    div[data-testid="stFormSubmitButton"] button[kind="primary"],
+    div[data-testid="stButton"] button[kind="primary"] {
+        background: #f0f1f5 !important;
+        color: #111318 !important;
+        border: 0 !important;
+    }
+    div[data-baseweb="select"] > div,
+    div[data-testid="stTextArea"] textarea,
+    div[data-testid="stTextInput"] input {
+        background: #171a20 !important;
+        color: #f5f6f8 !important;
+        border-color: #353943 !important;
+        border-radius: 12px !important;
+    }
+    div[data-testid="stTextArea"] textarea::placeholder {
+        color: #9298a4 !important;
+    }
+    div[data-testid="stImage"] img,
+    div[data-testid="stVideo"] video {
+        border-radius: 13px;
+    }
+    .gallery-empty {
+        border: 1px dashed #3b3f49;
+        border-radius: 16px;
+        padding: 2.2rem 1rem;
+        text-align: center;
+        color: #a4a9b4;
+        background: #111318;
+    }
+    .composer {
+        background: #171a20;
+        border: 1px solid #3a3e48;
+        border-radius: 18px;
+        padding: 1rem;
+        margin-top: 1rem;
+    }
+    div[data-testid="stHorizontalBlock"] { gap: .65rem; }
+    [data-testid="stCaptionContainer"] p { color: var(--muted) !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# قراءة الرمز من Streamlit Secrets أو متغير البيئة.
-try:
-    API_TOKEN = st.secrets.get("REPLICATE_API_TOKEN", "")
-except Exception:
-    API_TOKEN = ""
+# ---------------------------------------------------------
+# مفاتيح الاتصال: تحفظ في Streamlit Secrets ولا تظهر للمستخدم
+# ---------------------------------------------------------
+def get_secret(name: str, default: str = "") -> str:
+    try:
+        value = st.secrets.get(name, default)
+        return str(value) if value is not None else default
+    except Exception:
+        return os.getenv(name, default)
 
-API_TOKEN = API_TOKEN or os.getenv("REPLICATE_API_TOKEN", "")
 
-with st.sidebar:
-    st.header("⚙️ إعدادات الاتصال")
-    st.write("أضف رمز Replicate في إعدادات التطبيق أو في ملف `.env`/متغيرات البيئة.")
-    st.caption("لا تضع رمز API مباشرة داخل الكود أو في مستودع عام.")
+API_TOKEN = get_secret("REPLICATE_API_TOKEN")
+IMAGE_MODEL = get_secret("REPLICATE_IMAGE_MODEL")
+VIDEO_MODEL = get_secret("REPLICATE_VIDEO_MODEL")
 
-if not API_TOKEN:
-    st.warning(
-        "لم يتم العثور على REPLICATE_API_TOKEN. أضف الرمز قبل استخدام التوليد."
-    )
+# إعدادات اختيارية خاصة بمدخلات كل موديل.
+# اتركيها غير موجودة لاستخدام prompt فقط، أو ضعي JSON المتوافق
+# مع صفحة الموديل في Streamlit Secrets.
+IMAGE_INPUTS_JSON = get_secret(
+    "IMAGE_INPUTS_JSON", '{"prompt": "{{PROMPT}}"}'
+)
+VIDEO_INPUTS_JSON = get_secret(
+    "VIDEO_INPUTS_JSON", '{"prompt": "{{PROMPT}}"}'
+)
 
 client = replicate.Client(api_token=API_TOKEN) if API_TOKEN else None
 
-def build_inputs(raw_json: str, prompt: str) -> dict:
-    """يقرأ JSON خاصًا بمدخلات النموذج ويستبدل {{PROMPT}} بالنص."""
+# ---------------------------------------------------------
+# وظائف مساعدة
+# ---------------------------------------------------------
+def build_inputs(raw_json: str, prompt: str, extra: dict | None = None) -> dict:
     try:
         inputs = json.loads(raw_json or "{}")
     except json.JSONDecodeError as exc:
-        raise ValueError(f"JSON غير صالح: {exc}") from exc
+        raise ValueError(f"إعدادات الموديل غير صحيحة: {exc}") from exc
 
     if not isinstance(inputs, dict):
-        raise ValueError("يجب أن تكون مدخلات النموذج كائن JSON.")
+        raise ValueError("إعدادات الموديل يجب أن تكون JSON object.")
 
-    def replace_prompt(value):
+    def replace(value: Any) -> Any:
         if isinstance(value, str):
-            return value.replace("{{PROMPT}}", prompt)
+            return (
+                value.replace("{{PROMPT}}", prompt)
+                .replace("{{DURATION}}", str((extra or {}).get("duration", "")))
+                .replace("{{ASPECT_RATIO}}", str((extra or {}).get("aspect_ratio", "")))
+                .replace("{{RESOLUTION}}", str((extra or {}).get("resolution", "")))
+            )
         if isinstance(value, list):
-            return [replace_prompt(item) for item in value]
+            return [replace(item) for item in value]
         if isinstance(value, dict):
-            return {key: replace_prompt(item) for key, item in value.items()}
+            return {key: replace(item) for key, item in value.items()}
         return value
 
-    inputs = replace_prompt(inputs)
+    inputs = replace(inputs)
     inputs.setdefault("prompt", prompt)
     return inputs
 
-def output_to_text(value) -> str:
-    """تحويل ناتج النموذج إلى نص قابل للعرض."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (list, tuple)):
-        return "\n".join(output_to_text(item) for item in value)
-    if isinstance(value, dict):
-        return json.dumps(value, ensure_ascii=False, indent=2)
-    return str(value)
 
-def output_urls(value) -> list[str]:
-    """استخراج روابط الملفات من نواتج Replicate الشائعة."""
-    urls = []
-
-    if isinstance(value, str):
-        if value.startswith(("https://", "http://")):
-            urls.append(value)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            urls.extend(output_urls(item))
-    elif isinstance(value, dict):
-        for item in value.values():
-            urls.extend(output_urls(item))
+def collect_urls(result: Any) -> list[str]:
+    urls: list[str] = []
+    if isinstance(result, str):
+        if result.startswith(("https://", "http://")):
+            urls.append(result)
+    elif isinstance(result, (list, tuple)):
+        for item in result:
+            urls.extend(collect_urls(item))
+    elif isinstance(result, dict):
+        for item in result.values():
+            urls.extend(collect_urls(item))
     else:
-        url = getattr(value, "url", None)
+        url = getattr(result, "url", None)
+        if callable(url):
+            try:
+                url = url()
+            except Exception:
+                url = None
         if url:
             urls.append(str(url))
-        else:
-            text = str(value)
-            if text.startswith(("https://", "http://")):
-                urls.append(text)
-
     return list(dict.fromkeys(urls))
 
-def run_model(model_name: str, inputs: dict):
+
+def run_generation(model: str, inputs: dict) -> Any:
     if not API_TOKEN or client is None:
-        raise RuntimeError("أضف REPLICATE_API_TOKEN أولًا.")
-    if not model_name.strip():
-        raise ValueError("أدخل معرّف النموذج، مثل owner/model.")
-    return client.run(model_name.strip(), input=inputs)
-
-def show_download(url: str, filename: str):
-    st.markdown(f"[فتح الملف أو تنزيله]({url})")
-    try:
-        import requests
-
-        response = requests.get(url, timeout=60)
-        response.raise_for_status()
-        st.download_button(
-            "⬇️ تنزيل",
-            data=response.content,
-            file_name=filename,
-            mime=response.headers.get("content-type", "application/octet-stream"),
-            key=f"download-{filename}-{url}",
+        raise RuntimeError(
+            "إعداد الاتصال غير مكتمل. أضيفي REPLICATE_API_TOKEN في Streamlit Secrets."
         )
-    except Exception:
-        st.caption("تعذّر تجهيز زر التنزيل المباشر؛ استخدم رابط الملف أعلاه.")
+    if not model:
+        raise RuntimeError(
+            "لم يتم إعداد موديل هذا النوع بعد. أضيفي معرّف الموديل في Streamlit Secrets."
+        )
+    return client.run(model, input=inputs)
 
-tab_images, tab_videos, tab_stories = st.tabs(
-    ["📸 الصور", "🎥 الفيديوهات", "📖 القصص والترجمة"]
+
+# حفظ عناصر المعرض خلال جلسة Streamlit الحالية
+if "gallery_items" not in st.session_state:
+    st.session_state.gallery_items = []
+
+# ---------------------------------------------------------
+# رأس الصفحة والفلاتر
+# ---------------------------------------------------------
+st.markdown('<div class="top-title">✦ AI CREATIVE STUDIO</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="subtle">Your creative space for images, videos and workflows.</div>',
+    unsafe_allow_html=True,
 )
 
-# ---------------- الصور ----------------
-with tab_images:
-    st.header("توليد الصور")
-    with st.form("image_form"):
-        image_prompt = st.text_area(
-            "وصف الصورة",
-            placeholder="مثال: شخصية كرتونية لطيفة على شكل جزرة في حديقة...",
-            height=110,
-        )
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            image_style = st.selectbox(
-                "النمط", ["أنمي", "كرتوني", "3D", "سينمائي", "واقعي", "شخصيات خضروات"]
-            )
-        with col2:
-            image_count = st.slider("عدد النتائج المطلوب", 1, 6, 1)
-        with col3:
-            image_quality = st.selectbox("الجودة المطلوبة", ["1080p HD", "4K", "8K"])
-
-        image_model = st.text_input(
-            "معرّف نموذج الصور على Replicate",
-            value=os.getenv("REPLICATE_IMAGE_MODEL", ""),
-            placeholder="owner/model",
-        )
-        image_inputs_json = st.text_area(
-            "مدخلات إضافية للنموذج بصيغة JSON",
-            value='{"prompt": "{{PROMPT}}"}',
-        )
-        image_submit = st.form_submit_button("✨ توليد الصور", type="primary")
-
-    if image_submit:
-        if not image_prompt.strip():
-            st.warning("أدخل وصف الصورة أولًا.")
-        else:
-            final_prompt = (
-                f"{image_prompt.strip()}. النمط: {image_style}. "
-                f"الجودة المطلوبة: {image_quality}. "
-                f"عدد النتائج المطلوب: {image_count}."
-            )
-            try:
-                inputs = build_inputs(image_inputs_json, final_prompt)
-                with st.spinner("جارٍ إرسال الطلب وانتظار نتيجة نموذج الصور..."):
-                    result = run_model(image_model, inputs)
-
-                urls = output_urls(result)
-                if urls:
-                    st.success("اكتمل توليد الصور.")
-                    cols = st.columns(min(len(urls), 3))
-                    for index, url in enumerate(urls):
-                        with cols[index % len(cols)]:
-                            st.image(url, caption=f"النتيجة {index + 1}")
-                            show_download(url, f"image-{index + 1}.png")
-                else:
-                    st.success("اكتمل الطلب.")
-                    st.write(output_to_text(result))
-            except Exception as exc:
-                st.error(f"تعذّر توليد الصور: {exc}")
-
-# ---------------- الفيديوهات ----------------
-with tab_videos:
-    st.header("توليد الفيديوهات")
-    with st.form("video_form"):
-        video_prompt = st.text_area(
-            "سيناريو أو وصف الفيديو",
-            placeholder="صف الأحداث والشخصيات والمكان وحركة الكاميرا...",
-            height=120,
-        )
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            duration = st.selectbox(
-                "المدة المطلوبة",
-                ["دقيقة واحدة", "دقيقتان", "5 دقائق", "10 دقائق", "15 دقيقة"],
-            )
-        with col2:
-            video_style = st.selectbox(
-                "النمط", ["3D", "سينمائي", "أنمي", "كرتوني", "واقعي"]
-            )
-        with col3:
-            camera_mode = st.selectbox(
-                "الكاميرا",
-                ["تلقائي", "لقطة واسعة", "لقطة قريبة", "كاميرا متحركة"],
-            )
-
-        character_count = st.number_input(
-            "عدد الشخصيات", min_value=1, max_value=10, value=1
-        )
-        characters = [
-            st.text_input(f"وصف الشخصية {index + 1}", key=f"video-character-{index}")
-            for index in range(int(character_count))
-        ]
-        sync_audio = st.checkbox("طلب مزامنة الصوت وحركة الشفاه", value=False)
-
-        video_model = st.text_input(
-            "معرّف نموذج الفيديو على Replicate",
-            value=os.getenv("REPLICATE_VIDEO_MODEL", "tencent/hunyuan-video"),
-            placeholder="owner/model",
-        )
-        video_inputs_json = st.text_area(
-            "مدخلات إضافية للنموذج بصيغة JSON",
-            value='{"prompt": "{{PROMPT}}"}',
-        )
-        video_submit = st.form_submit_button("🎬 توليد الفيديو", type="primary")
-
-    if video_submit:
-        if not video_prompt.strip():
-            st.warning("أدخل وصف الفيديو أولًا.")
-        else:
-            character_text = "، ".join(item.strip() for item in characters if item.strip())
-            final_prompt = (
-                f"{video_prompt.strip()}. المدة المطلوبة: {duration}. "
-                f"النمط: {video_style}. الكاميرا: {camera_mode}. "
-                f"الشخصيات: {character_text or 'غير محددة'}. "
-                f"مزامنة الصوت وحركة الشفاه: {'مطلوبة' if sync_audio else 'غير مطلوبة'}."
-            )
-            try:
-                inputs = build_inputs(video_inputs_json, final_prompt)
-                with st.spinner("جارٍ إرسال الطلب وانتظار نتيجة نموذج الفيديو..."):
-                    result = run_model(video_model, inputs)
-
-                urls = output_urls(result)
-                if urls:
-                    st.success("اكتمل توليد الفيديو.")
-                    for index, url in enumerate(urls):
-                        st.video(url)
-                        show_download(url, f"video-{index + 1}.mp4")
-                else:
-                    st.success("اكتمل الطلب.")
-                    st.write(output_to_text(result))
-            except Exception as exc:
-                st.error(f"تعذّر توليد الفيديو: {exc}")
-
-# ---------------- القصص ----------------
-with tab_stories:
-    st.header("إنشاء القصص والسيناريوهات")
-    story_mode = st.radio(
-        "طريقة إنشاء القصة",
-        ["من فكرة نصية", "من صورة"],
+filter_col, sort_col, refresh_col = st.columns([3, 1.2, 1])
+with filter_col:
+    gallery_filter = st.radio(
+        "عرض المعرض",
+        ["All", "Video", "Image"],
         horizontal=True,
+        label_visibility="collapsed",
+    )
+with sort_col:
+    sort_order = st.selectbox(
+        "الترتيب", ["Newest", "Oldest"], label_visibility="collapsed"
+    )
+with refresh_col:
+    st.button("↻ Refresh", use_container_width=True)
+
+st.markdown("---")
+items = list(st.session_state.gallery_items)
+if sort_order == "Oldest":
+    items.reverse()
+if gallery_filter != "All":
+    items = [item for item in items if item["type"] == gallery_filter.lower()]
+
+if not items:
+    st.markdown(
+        """
+        <div class="gallery-empty">
+            <div style="font-size:2rem;">✦</div>
+            <b>Your creations will appear here</b>
+            <p style="color:#a4a9b4;margin-bottom:0;">
+                ابدئي بإنشاء صورة أو فيديو، وستظهر النتيجة في هذا المعرض.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    cols_per_row = 4
+    for start in range(0, len(items), cols_per_row):
+        row_items = items[start : start + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for col, item in zip(cols, row_items):
+            with col:
+                st.caption(item["type"].upper())
+                if item["type"] == "image":
+                    st.image(item["url"], use_container_width=True)
+                else:
+                    st.video(item["url"])
+                st.caption(item.get("prompt", "")[:90])
+
+# ---------------------------------------------------------
+# لوحة الإنشاء
+# ---------------------------------------------------------
+st.markdown("---")
+st.markdown("### Create something new")
+
+mode = st.radio(
+    "نوع الإنشاء",
+    ["Image", "Video", "Workflow"],
+    horizontal=True,
+    label_visibility="collapsed",
+)
+
+if mode == "Workflow":
+    st.info(
+        "مساحة Workflow قيد التجهيز. سنضيف فيها ربط الصورة بالصوت والفيديو "
+        "بعد التأكد من عمل توليد الصور والفيديو."
     )
 
-    with st.form("story_form"):
-        uploaded_image = None
-        if story_mode == "من فكرة نصية":
-            story_prompt = st.text_area(
-                "فكرة القصة",
-                placeholder="مثال: طفل يعثر على خريطة سرية في مكتبة قديمة...",
-                height=120,
+elif mode == "Image":
+    with st.form("image_generation_form"):
+        prompt = st.text_area(
+            "وصف الصورة",
+            placeholder="Describe the image you want to create...",
+            height=105,
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            style = st.selectbox(
+                "Style",
+                ["Cinematic", "Photorealistic", "3D", "Anime", "Cartoon", "Artistic"],
             )
-        else:
-            uploaded_image = st.file_uploader(
-                "ارفع صورة",
-                type=["png", "jpg", "jpeg", "webp"],
-            )
-            story_prompt = st.text_area(
-                "تعليمات إضافية للقصة (اختياري)",
-                placeholder="اكتب نوع القصة أو الشخصيات أو الأحداث المطلوبة...",
-                height=90,
-            )
+        with c2:
+            aspect = st.selectbox("Aspect ratio", ["1:1", "16:9", "9:16", "4:5", "3:2"])
+        with c3:
+            quality = st.selectbox("Quality", ["Standard", "High", "Ultra"])
 
-        story_language = st.selectbox(
-            "لغة النتيجة", ["العربية", "English", "العربية والإنجليزية"]
-        )
-        story_model = st.text_input(
-            "معرّف نموذج القصة على Replicate",
-            value=os.getenv("REPLICATE_STORY_MODEL", ""),
-            placeholder="owner/model",
-        )
-        story_inputs_json = st.text_area(
-            "مدخلات النموذج بصيغة JSON",
-            value='{"prompt": "{{PROMPT}}"}',
+        submitted = st.form_submit_button(
+            "✨ Generate image", type="primary", use_container_width=True
         )
 
-        image_input_key = st.text_input(
-            "اسم حقل الصورة في النموذج",
-            value="image",
-        )
-        story_submit = st.form_submit_button("📖 إنشاء القصة", type="primary")
-
-    if story_submit:
-        if story_mode == "من فكرة نصية" and not story_prompt.strip():
-            st.warning("أدخل فكرة القصة أولًا.")
-        elif story_mode == "من صورة" and uploaded_image is None:
-            st.warning("ارفع صورة أولًا.")
+    if submitted:
+        if not prompt.strip():
+            st.warning("اكتبي وصف الصورة أولًا.")
         else:
             final_prompt = (
-                f"{story_prompt.strip() or 'أنشئ قصة مناسبة للصورة.'} "
-                f"اكتب النتيجة باللغة: {story_language}. "
-                "نظّمها إلى عنوان، قصة، ثم مشاهد عند ملاءمة ذلك."
+                f"{prompt.strip()}. Visual style: {style}. "
+                f"Aspect ratio requested: {aspect}. Quality preference: {quality}."
             )
             try:
-                inputs = build_inputs(story_inputs_json, final_prompt)
-
-                if uploaded_image is not None:
-                    suffix = Path(uploaded_image.name).suffix or ".png"
-                    with tempfile.NamedTemporaryFile(
-                        suffix=suffix, delete=False
-                    ) as temp_file:
-                        temp_file.write(uploaded_image.getvalue())
-                        temp_path = temp_file.name
-
-                    try:
-                        with open(temp_path, "rb") as image_file:
-                            inputs[image_input_key.strip() or "image"] = image_file
-                            with st.spinner("جارٍ تحليل الصورة وإنشاء القصة..."):
-                                result = run_model(story_model, inputs)
-                    finally:
-                        Path(temp_path).unlink(missing_ok=True)
+                inputs = build_inputs(IMAGE_INPUTS_JSON, final_prompt)
+                with st.spinner("Generating image..."):
+                    result = run_generation(IMAGE_MODEL, inputs)
+                urls = collect_urls(result)
+                if not urls:
+                    st.success("انتهى الطلب، لكن الموديل لم يُرجع رابط صورة واضحًا.")
+                    st.write(str(result))
                 else:
-                    with st.spinner("جارٍ إنشاء القصة..."):
-                        result = run_model(story_model, inputs)
-
-                st.success("اكتمل إنشاء القصة.")
-                st.markdown(output_to_text(result))
+                    for url in urls:
+                        st.session_state.gallery_items.insert(
+                            0, {"type": "image", "url": url, "prompt": prompt.strip()}
+                        )
+                    st.success("تم إنشاء الصورة بنجاح.")
+                    st.image(urls[0], use_container_width=True)
+                    st.markdown(f"[فتح الصورة]({urls[0]})")
             except Exception as exc:
-                st.error(f"تعذّر إنشاء القصة: {exc}")
+                st.error(f"تعذر إنشاء الصورة: {exc}")
+
+elif mode == "Video":
+    with st.form("video_generation_form"):
+        prompt = st.text_area(
+            "وصف الفيديو والحركة",
+            placeholder="Describe the scene, action, camera movement and mood...",
+            height=105,
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            aspect = st.selectbox("Aspect ratio", ["16:9", "9:16", "1:1"])
+        with c2:
+            duration = st.selectbox("Duration", ["5s", "8s", "10s"])
+        with c3:
+            resolution = st.selectbox("Resolution", ["720p", "1080p"])
+
+        submitted = st.form_submit_button(
+            "🎬 Generate video", type="primary", use_container_width=True
+        )
+
+    if submitted:
+        if not prompt.strip():
+            st.warning("اكتبي وصف الفيديو أولًا.")
+        else:
+            final_prompt = (
+                f"{prompt.strip()}. Requested duration: {duration}. "
+                f"Aspect ratio: {aspect}. Requested resolution: {resolution}."
+            )
+            extra = {
+                "duration": duration.replace("s", ""),
+                "aspect_ratio": aspect,
+                "resolution": resolution,
+            }
+            try:
+                inputs = build_inputs(VIDEO_INPUTS_JSON, final_prompt, extra)
+                with st.spinner("Generating video... قد يستغرق الأمر بعض الوقت."):
+                    result = run_generation(VIDEO_MODEL, inputs)
+                urls = collect_urls(result)
+                if not urls:
+                    st.success("انتهى الطلب، لكن الموديل لم يُرجع رابط فيديو واضحًا.")
+                    st.write(str(result))
+                else:
+                    for url in urls:
+                        st.session_state.gallery_items.insert(
+                            0, {"type": "video", "url": url, "prompt": prompt.strip()}
+                        )
+                    st.success("تم إنشاء الفيديو بنجاح.")
+                    st.video(urls[0])
+                    st.markdown(f"[فتح الفيديو]({urls[0]})")
+            except Exception as exc:
+                st.error(f"تعذر إنشاء الفيديو: {exc}")
+
+st.markdown(
+    '<p class="subtle" style="text-align:center;margin-top:2rem;">'
+    'AI Creative Studio · Powered by Replicate</p>',
+    unsafe_allow_html=True,
+)
