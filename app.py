@@ -116,9 +116,6 @@ API_TOKEN = get_secret("REPLICATE_API_TOKEN")
 IMAGE_MODEL = get_secret("REPLICATE_IMAGE_MODEL")
 VIDEO_MODEL = get_secret("REPLICATE_VIDEO_MODEL")
 
-# إعدادات اختيارية خاصة بمدخلات كل موديل.
-# اتركيها غير موجودة لاستخدام prompt فقط، أو ضعي JSON المتوافق
-# مع صفحة الموديل في Streamlit Secrets.
 IMAGE_INPUTS_JSON = get_secret(
     "IMAGE_INPUTS_JSON", '{"prompt": "{{PROMPT}}"}'
 )
@@ -220,7 +217,8 @@ with sort_col:
         "الترتيب", ["Newest", "Oldest"], label_visibility="collapsed"
     )
 with refresh_col:
-    st.button("↻ Refresh", use_container_width=True)
+    if st.button("↻ Refresh", use_container_width=True):
+        st.rerun()
 
 st.markdown("---")
 items = list(st.session_state.gallery_items)
